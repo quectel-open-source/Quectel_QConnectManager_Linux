@@ -1,19 +1,12 @@
 /*
-    Copyright (C) 2024 Quectel Wireless Solutions Co., Ltd.
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-    This program is free software; you can redistribute it and/or
-    modify it under the terms of the GNU General Public License
-    as published by the Free Software Foundation; either version 2
-    of the License, or (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, see
-    <https://www.gnu.org/licenses/>.
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
 */
 
 #include <unistd.h>
@@ -38,7 +31,7 @@
 
 extern int asprintf(char **s, const char *fmt, ...);
 
-#include "compreh.h"
+#include "QMIThread.h"
 
 #include "atchannel.h"
 #include "at_tok.h"
@@ -57,6 +50,7 @@ static int s_pdp;
 static int atc_init(PROFILE_T *profile) {
     int err;
     char *cmd;
+    int ret;
     ATResponse *p_response = NULL;
 
     if (profile->proxy[0])  {
@@ -97,7 +91,11 @@ static int atc_init(PROFILE_T *profile) {
         err = at_tok_scanf(p_response->p_intermediates->line, "%s%d", NULL, &old_nat);
         if (err == 2 && old_nat != new_nat) {
             safe_at_response_free(p_response);
-            asprintf(&cmd, "AT+QCFG=\"NAT\",%d", new_nat);
+            ret = asprintf(&cmd, "AT+QCFG=\"NAT\",%d", new_nat);
+            if(ret == -1)
+            {
+                dbg_time("asprintf failed");
+            }
             err = at_send_command(cmd, &p_response);
             safe_free(cmd);
             if (!at_response_error(err, p_response)) {
@@ -332,10 +330,15 @@ done:
 static int requestEnterSimPin(const char *pPinCode) {
     int retVal = -1;
     int err;
+    int ret;
     ATResponse *p_response = NULL;
     char *cmd = NULL;
 
-    asprintf(&cmd, "AT+CPIN=%s", pPinCode);
+    ret = asprintf(&cmd, "AT+CPIN=%s", pPinCode);
+    if(ret == -1)
+    {
+        dbg_time("asprintf failed");
+    }
     err = at_send_command(cmd, NULL);
     safe_free(cmd);
 
@@ -349,6 +352,7 @@ static int requestEnterSimPin(const char *pPinCode) {
 
 static int requestSetProfile(PROFILE_T *profile) {
     int err;
+    int ret;
     ATResponse *p_response = NULL;
     char *cmd = NULL;
     const char *new_apn = profile->apn ? profile->apn : "";
@@ -369,13 +373,21 @@ static int requestSetProfile(PROFILE_T *profile) {
         return 0;
     }
 
-    asprintf(&cmd, "AT+QICSGP=%d,%d,\"%s\",\"%s\",\"%s\",%d",
+    ret = asprintf(&cmd, "AT+QICSGP=%d,%d,\"%s\",\"%s\",\"%s\",%d",
         profile->pdp, profile->iptype, new_apn, new_user, new_pd, profile->auth);
+    if(ret == -1)
+    {
+        dbg_time("asprintf failed");
+    }
     err = at_send_command(cmd, &p_response);
     safe_free(cmd);
     if (at_response_error(err, p_response)) {
         safe_at_response_free(p_response);
-        asprintf(&cmd, "AT+CGDCONT=%d,\"%s\",\"%s\"", profile->pdp, ipStr[profile->iptype], new_apn);
+        ret = asprintf(&cmd, "AT+CGDCONT=%d,\"%s\",\"%s\"", profile->pdp, ipStr[profile->iptype], new_apn);
+        if(ret == -1)
+        {
+            dbg_time("asprintf failed");
+        }
         err = at_send_command(cmd, &p_response);
         safe_free(cmd);
     }
@@ -387,6 +399,7 @@ static int requestSetProfile(PROFILE_T *profile) {
 static int requestGetProfile(PROFILE_T *profile) {
     int retVal = -1;
     int err;
+    int ret;
     ATResponse *p_response = NULL;
     char *cmd = NULL;
     int pdp;
@@ -403,13 +416,21 @@ static int requestGetProfile(PROFILE_T *profile) {
         profile->iptype = 1;
 
 _re_check:
-    asprintf(&cmd, "AT+QICSGP=%d", profile->pdp);
+    ret = asprintf(&cmd, "AT+QICSGP=%d", profile->pdp);
+    if(ret == -1)
+    {
+        dbg_time("asprintf failed");
+    }
     err = at_send_command_singleline(cmd, "+QICSGP:", &p_response);
     safe_free(cmd);
     if (err == AT_ERROR_INVALID_RESPONSE && p_response == NULL) {
         //bug of RG801H
         safe_at_response_free(p_response);
-        asprintf(&cmd, "AT+QICSGP=%d,%d,\"\",\"\",\"\",0", profile->pdp, profile->iptype);
+        ret = asprintf(&cmd, "AT+QICSGP=%d,%d,\"\",\"\",\"\",0", profile->pdp, profile->iptype);
+        if(ret == -1)
+        {
+            dbg_time("asprintf failed");
+        }
         err = at_send_command(cmd, &p_response);
         safe_free(cmd);
         if (!at_response_error(err, p_response)) {
@@ -587,6 +608,7 @@ error:
 
 static int requestSetupDataCall(PROFILE_T *profile, int curIpFamily) {
     int err;
+    int ret;
     ATResponse *p_response = NULL;
     char *cmd = NULL;
     ATLine *p_cur = NULL;
@@ -597,7 +619,11 @@ static int requestSetupDataCall(PROFILE_T *profile, int curIpFamily) {
 
     if (strStartsWith(profile->BaseBandVersion, "RG801H") || strStartsWith(profile->BaseBandVersion, "EC200H")) {
         //RG801H will miss USB_CDC_NOTIFY_NETWORK_CONNECTION
-        asprintf(&cmd, "ifconfig %s up", profile->usbnet_adapter);
+        ret = asprintf(&cmd, "ifconfig %s up", profile->usbnet_adapter);
+        if(ret == -1)
+        {
+            dbg_time("asprintf failed");
+        }
         if (system(cmd)) {};
         safe_free(cmd);
     }
@@ -620,7 +646,11 @@ static int requestSetupDataCall(PROFILE_T *profile, int curIpFamily) {
         safe_at_response_free(p_response);
 
         if (state == 0) {
-            asprintf(&cmd, "AT+CGACT=1,%d", pdp);
+            ret = asprintf(&cmd, "AT+CGACT=1,%d", pdp);
+            if(ret == -1)
+            {
+                dbg_time("asprintf failed");
+            }
             err = at_send_command(cmd, &p_response);
             safe_free(cmd);
             if (at_response_error(err, p_response))
@@ -629,9 +659,13 @@ static int requestSetupDataCall(PROFILE_T *profile, int curIpFamily) {
     }
 
     if(asr_style_atc)
-        asprintf(&cmd, "AT+QNETDEVCTL=1,%d,%d", pdp, 1);
+        ret = asprintf(&cmd, "AT+QNETDEVCTL=1,%d,%d", pdp, 1);
     else
-        asprintf(&cmd, "AT+QNETDEVCTL=%d,1,%d", pdp, 1);
+        ret = asprintf(&cmd, "AT+QNETDEVCTL=%d,1,%d", pdp, 1);
+    if(ret == -1)
+    {
+        dbg_time("asprintf failed");
+    }
     err = at_send_command(cmd, &p_response);
     safe_free(cmd);
 
@@ -642,7 +676,12 @@ static int requestSetupDataCall(PROFILE_T *profile, int curIpFamily) {
         int t = 0;
 
         while (t++ < 15) {
-            asprintf(&cmd, "AT+QNETDEVSTATUS=%d", pdp);
+            ret = asprintf(&cmd, "AT+QNETDEVSTATUS=%d", pdp);
+            if(ret == -1)
+            {
+                dbg_time("asprintf failed");
+                continue;
+            }
             err = at_send_command_singleline(cmd, "+QNETDEVSTATUS", &p_response);
             safe_free(cmd);
             if (err) goto _error;
@@ -666,6 +705,7 @@ _error:
 
 static int at_netdevstatus(int pdp, unsigned int *pV4Addr) {
     int err;
+    int ret;
     ATResponse *p_response = NULL;
     char *cmd = NULL;
     char *ipv4_address = NULL;
@@ -681,7 +721,11 @@ static int at_netdevstatus(int pdp, unsigned int *pV4Addr) {
 
     *pV4Addr = 0;
 
-    asprintf(&cmd, "AT+QNETDEVSTATUS=%d", pdp);
+    ret = asprintf(&cmd, "AT+QNETDEVSTATUS=%d", pdp);
+    if(ret == -1)
+    {
+        dbg_time("asprintf failed");
+    }
     err = at_send_command_singleline(cmd, "+QNETDEVSTATUS", &p_response);
     safe_free(cmd);
     if (at_response_error(err, p_response)) goto _error;
@@ -782,14 +826,19 @@ _error:
 
 static int requestDeactivateDefaultPDP(PROFILE_T *profile, int curIpFamily) {
     char *cmd = NULL;
+    int ret;
     int pdp = profile->pdp;
 
     (void)curIpFamily;
 
     if (asr_style_atc)
-        asprintf(&cmd, "AT+QNETDEVCTL=0,%d,%d", pdp, 0);
+        ret = asprintf(&cmd, "AT+QNETDEVCTL=0,%d,%d", pdp, 0);
     else
-        asprintf(&cmd, "AT+QNETDEVCTL=%d,0,%d", pdp, 0);
+        ret = asprintf(&cmd, "AT+QNETDEVCTL=%d,0,%d", pdp, 0);
+    if(ret == -1)
+    {
+        dbg_time("asprintf failed");
+    }
     at_send_command(cmd, NULL);
     safe_free(cmd);
 
@@ -799,6 +848,7 @@ static int requestDeactivateDefaultPDP(PROFILE_T *profile, int curIpFamily) {
 
 static int requestGetIPAddress(PROFILE_T *profile, int curIpFamily) {
     int err;
+    int ret;
     ATResponse *p_response = NULL;
     char *cmd = NULL;
     ATLine *p_cur = NULL;
@@ -813,7 +863,11 @@ static int requestGetIPAddress(PROFILE_T *profile, int curIpFamily) {
         goto _error;
     }
 
-    asprintf(&cmd, "AT+CGPADDR=%d", profile->pdp);
+    ret = asprintf(&cmd, "AT+CGPADDR=%d", profile->pdp);
+    if(ret == -1)
+    {
+        dbg_time("asprintf failed");
+    }
     err = at_send_command_singleline(cmd, "+CGPADDR:", &p_response);
     safe_free(cmd);
     if (at_response_error(err, p_response))

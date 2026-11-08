@@ -1,19 +1,12 @@
 /*
-    Copyright (C) 2024 Quectel Wireless Solutions Co., Ltd.
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-    This program is free software; you can redistribute it and/or
-    modify it under the terms of the GNU General Public License
-    as published by the Free Software Foundation; either version 2
-    of the License, or (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, see
-    <https://www.gnu.org/licenses/>.
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
 */
 
 #include <unistd.h>
@@ -31,8 +24,9 @@
 #include <net/if.h>
 #include <time.h>
 #include <pthread.h>
+#include <poll.h>
 
-#include "compreh.h"
+#include "QMIThread.h"
 #include "ethtool-copy.h"
 
 #define USB_CLASS_VENDOR_SPEC		0xff
@@ -369,10 +363,6 @@ BOOL qmidevice_detect(char *qmichannel, char *usbnet_adapter, unsigned bufsize, 
                         atIntf = 3;
                 break;
 
-                case 0x0903: //EC801E-CN(LE)/EC800Z-CN(01LE)
-                        atIntf = 3; //RNDIS、ECM
-                break;
-
                 default:
                    dbg_time("unknow at interface for USB idProduct:%04x\n", profile->usb_dev.idProduct);
                 break;
@@ -691,7 +681,16 @@ static void *catch_log(void *arg)
     int nreads = 0;
     char tbuff[256+32];
     char filter[32];
-    size_t tsize = strlen(get_time()) + 1;
+
+    /*The length of the timestamp normally obtained will not exceed 256 + 32, 
+    but the compiler cannot determine the actual length of the timestamp during the compilation process. 
+    So compilation generates warnings.
+    In the compilation options, the -Werror flag treats warnings as errors.*/
+    size_t timelen = strlen(get_time());
+    /* Clamp so sizeof(tbuff) - tsize - 1 cannot unsigned-wrap (fixes -Wstringop-overflow). */
+    if (timelen >= sizeof(tbuff) - 3)
+        timelen = sizeof(tbuff) - 3;
+    size_t tsize = timelen + 1;
 
     snprintf(filter, sizeof(filter), ":%d:%03d:", profile->usb_dev.busnum, profile->usb_dev.devnum);
 
@@ -764,4 +763,338 @@ void ql_stop_usbmon_log(PROFILE_T *profile) {
         close(profile->usbmon_fd);
     if (profile->usbmon_logfile_fp)
         fclose(profile->usbmon_logfile_fp);
+}
+
+
+static int sysfs_read_pci_bus_vendor_device(const char *bdf, unsigned int *vendor, unsigned int *device)
+{
+    char vpath[PATH_MAX];
+    char dpath[PATH_MAX];
+    FILE *fp;
+
+    if (!bdf || !bdf[0])
+        return 0;
+    if (snprintf(vpath, sizeof(vpath), "/sys/bus/pci/devices/%s/vendor", bdf) >= (int)sizeof(vpath))
+        return 0;
+    if (snprintf(dpath, sizeof(dpath), "/sys/bus/pci/devices/%s/device", bdf) >= (int)sizeof(dpath))
+        return 0;
+    dbg_time("checking pci device %s vendor/device from %s and %s", bdf, vpath, dpath);
+    fp = fopen(vpath, "r");
+    if (!fp)
+        return 0;
+    if (fscanf(fp, "%x", vendor) != 1) {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+    fp = fopen(dpath, "r");
+    if (!fp)
+        return 0;
+    if (fscanf(fp, "%x", device) != 1) {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+    return 1;
+}
+
+static int pci_device_exists_on_bus(const char *name)
+{
+    char path[PATH_MAX];
+    struct stat st;
+
+    if (!name || !name[0])
+        return 0;
+    if (snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s", name) >= (int)sizeof(path))
+        return 0;
+    if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode))
+        return 0;
+    return 1;
+}
+
+static int is_pcie_dev_id(const char *netif)
+{
+    char start[PATH_MAX];
+    char cur[PATH_MAX];
+    /* cur is at most PATH_MAX-1 chars; "%s/.." needs +3 — parent must be wider than PATH_MAX */
+    char parent[PATH_MAX + 8];
+    unsigned int vendor = 0, device = 0;
+    int depth;
+
+    if (!netif || !netif[0]) {
+        dbg_time("invalid netif");
+        return 0;
+    }
+
+    snprintf(start, sizeof(start), "/sys/class/net/%s/device", netif);
+    //dbg_time("start realpath from %s", start);
+    if (!realpath(start, cur)) {
+        //dbg_time("realpath fail: %s errno %d (%s)", start, errno, strerror(errno));
+        return 0;
+    }
+    //dbg_time("realpath resolved to %s", cur);
+
+    for (depth = 0; depth < 32; depth++) {
+        const char *base_name = strrchr(cur, '/');
+        base_name = base_name ? (base_name + 1) : cur;
+
+        if (pci_device_exists_on_bus(base_name) && sysfs_read_pci_bus_vendor_device(base_name, &vendor, &device)) {
+            dbg_time("%s pci vendor/device from /sys/bus/pci/devices/%s: 0x%04x 0x%04x", netif, base_name, vendor, device);
+            if (vendor == 0x17cb && device == 0x011a)
+                return 1;
+            if (vendor == 0x1eac && (device == 0x100b || device == 0x1012 || device == 0x1013
+                || device == 0x1014 || device == 0x1015))
+                return 1;
+            /* Not modem EP: may be bridge/switch on path — keep walking up */
+        }
+        snprintf(parent, sizeof(parent), "%s/..", cur);
+        if (!realpath(parent, cur))
+            break;
+        if (!strcmp(cur, "/"))
+            break;
+    }
+
+    //dbg_time("%s no matching pci device under /sys/bus/pci/devices/ along net device chain", netif);
+    return 0;
+}
+
+int is_pcie_sdx35(const PROFILE_T *profile)
+{
+    if (!profile || !profile->usbnet_adapter[0])
+        return 0;
+
+    return is_pcie_dev_id(profile->usbnet_adapter);
+}
+
+static int find_devnode_in_dir(const char *dirpath, const char *prefix, char *out_dev, size_t out_len) {
+    DIR *dir;
+    struct dirent *ent;
+    size_t prefix_len = prefix ? strlen(prefix) : 0;
+
+    if (!dirpath || !out_dev || out_len == 0)
+        return -1;
+
+    dir = opendir(dirpath);
+    if (!dir)
+        return -1;
+
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] == '.')
+            continue;
+        if (prefix_len && strncmp(ent->d_name, prefix, prefix_len))
+            continue;
+        if (snprintf(out_dev, out_len, "/dev/%s", ent->d_name) >= (int)out_len) {
+            closedir(dir);
+            return -1;
+        }
+        closedir(dir);
+        return 0;
+    }
+
+    closedir(dir);
+    return -1;
+}
+
+static int get_if2_ttyusb_by_netif(const char *netif, char *out_dev, size_t out_len) {
+    char sys_class_dev[PATH_MAX];
+    char resolved[PATH_MAX];
+    char *base_name;
+    char usb_dev_name[64];
+    char iface2_path[PATH_MAX];
+    char nested_tty_path[PATH_MAX];
+    char *colon;
+
+    if (!netif || !netif[0] || !out_dev || out_len == 0)
+        return -1;
+
+    snprintf(sys_class_dev, sizeof(sys_class_dev), "/sys/class/net/%s/device", netif);
+    if (!realpath(sys_class_dev, resolved)) {
+        //dbg_time("realpath fail: %s, errno: %d (%s)", sys_class_dev, errno, strerror(errno));
+        return -1;
+    }
+
+    base_name = strrchr(resolved, '/');
+    base_name = base_name ? (base_name + 1) : resolved;
+    strncpy(usb_dev_name, base_name, sizeof(usb_dev_name) - 1);
+    usb_dev_name[sizeof(usb_dev_name) - 1] = '\0';
+
+    colon = strchr(usb_dev_name, ':');
+    if (!colon) {
+        //dbg_time("unexpected usb interface path: %s", resolved);
+        return -1;
+    }
+    *colon = '\0';
+
+    if (snprintf(iface2_path, sizeof(iface2_path), "/sys/bus/usb/devices/%s:1.2", usb_dev_name) >= (int)sizeof(iface2_path)) {
+        //dbg_time("iface2 path too long for %s", netif);
+        return -1;
+    }
+
+    if (find_devnode_in_dir(iface2_path, "ttyUSB", out_dev, out_len) == 0)
+        return 0;
+
+    if (snprintf(nested_tty_path, sizeof(nested_tty_path), "%s/tty", iface2_path) >= (int)sizeof(nested_tty_path)) {
+        //dbg_time("nested tty path too long for %s", netif);
+        return -1;
+    }
+    if (find_devnode_in_dir(nested_tty_path, "ttyUSB", out_dev, out_len) == 0)
+        return 0;
+
+    dbg_time("cannot find ttyUSB under %s", iface2_path);
+    return -1;
+}
+
+static int get_pcie_at_by_netif(const char *netif, char *out_dev, size_t out_len) {
+    char sys_class_dev[PATH_MAX];
+    char resolved[PATH_MAX];
+    char *base_name;
+    char node_prefix[64];
+    char *p;
+    char dun_path[PATH_MAX];
+    const char *mhi_roots[] = {"/sys/bus/mhi_q/devices", "/sys/bus/mhi/devices"};
+    int i;
+
+    if (!netif || !netif[0] || !out_dev || out_len == 0)
+        return -1;
+
+    if (snprintf(sys_class_dev, sizeof(sys_class_dev), "/sys/class/net/%s/device", netif) >= (int)sizeof(sys_class_dev))
+        return -1;
+
+    if (!realpath(sys_class_dev, resolved)) {
+        dbg_time("realpath fail: %s, errno: %d (%s)", sys_class_dev, errno, strerror(errno));
+        return -1;
+    }
+
+    base_name = strrchr(resolved, '/');
+    base_name = base_name ? (base_name + 1) : resolved;
+    strncpy(node_prefix, base_name, sizeof(node_prefix) - 1);
+    node_prefix[sizeof(node_prefix) - 1] = '\0';
+    p = strstr(node_prefix, "_IP_HW");
+    if (!p)
+        p = strstr(node_prefix, "_IPCR");
+    if (p)
+        *p = '\0';
+
+    for (i = 0; i < (int)(sizeof(mhi_roots) / sizeof(mhi_roots[0])); i++) {
+        if (snprintf(dun_path, sizeof(dun_path), "%s/%s_DUN/mhi_uci_q", mhi_roots[i], node_prefix) >= (int)sizeof(dun_path))
+            continue;
+        if (find_devnode_in_dir(dun_path, NULL, out_dev, out_len) == 0)
+            return 0;
+    }
+
+    if (!access("/dev/mhi_DUN", R_OK | F_OK)) {
+        if (snprintf(out_dev, out_len, "/dev/mhi_DUN") >= (int)out_len)
+            return -1;
+        return 0;
+    }
+
+    return -1;
+}
+
+typedef struct {
+    int fd;
+    const char *at_portname;
+    int ok;
+} AT_READ_CTX_T;
+
+static void *set_apn_at_read_thread(void *arg) {
+    AT_READ_CTX_T *ctx = (AT_READ_CTX_T *)arg;
+    char rsp[256];
+    struct pollfd pfd;
+
+    if (!ctx)
+        pthread_exit(NULL);
+
+    pfd.fd = ctx->fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+
+    while (1) {
+        int pr = poll(&pfd, 1, 2000);
+        if (pr < 0) {
+            //dbg_time("%s AT poll error, errno: %d (%s)", ctx->at_portname, errno, strerror(errno));
+            break;
+        } else if (pr == 0) {
+            //dbg_time("%s AT set APN poll timeout", ctx->at_portname);
+            break;
+        } else {
+            ssize_t rd = read(ctx->fd, rsp, sizeof(rsp) - 1);
+            if (rd > 0) {
+                rsp[rd] = '\0';
+                if (strstr(rsp, "OK")) {
+                    //dbg_time("%s AT set APN ok", ctx->at_portname);
+                    ctx->ok = 1;
+                    break;
+                } else if (strstr(rsp, "ERROR")) {
+                    //dbg_time("%s AT set APN error", ctx->at_portname);
+                    break;
+                }
+            }
+        }
+    }
+
+    pthread_exit(NULL);
+}
+
+int set_apn_via_to_AT(PROFILE_T *profile) {
+    int ok = 0;
+    char at_portname[64];
+    pthread_t at_read_thread = 0;
+    AT_READ_CTX_T at_read_ctx;
+
+    if (profile->hardware_interface == HARDWARE_USB) {
+        if (get_if2_ttyusb_by_netif(profile->usbnet_adapter, at_portname, sizeof(at_portname)) != 0) {
+            dbg_time("fallback to default AT port /dev/ttyUSB2");
+            snprintf(at_portname, sizeof(at_portname), "/dev/ttyUSB2");
+        }
+    } else if (profile->hardware_interface == HARDWARE_PCIE) {
+        if (get_pcie_at_by_netif(profile->usbnet_adapter, at_portname, sizeof(at_portname)) != 0) {
+            dbg_time("fallback to default AT port /dev/mhi_DUN");
+            snprintf(at_portname, sizeof(at_portname), "/dev/mhi_DUN");
+        }
+    } else {
+        dbg_time("unknown hardware_interface for AT set APN");
+        return -1;
+    }
+
+    int fd = cm_open_dev(at_portname);
+    if (fd < 0) {
+        dbg_time("open %s fail, skip AT set APN", at_portname);
+        return -1;
+    }
+    const char *apn = profile->apn ? profile->apn : "";
+    const char *user = profile->user ? profile->user : "";
+    const char *pd = profile->pd ? profile->pd : "";
+    int profile_index = profile->profile_index;
+    if (profile_index < 0 || profile_index > 3) profile_index = 1;
+    char cmd[256];
+    int n = snprintf(cmd, sizeof(cmd), "AT+QICSGP=%d,%d,\"%s\",\"%s\",\"%s\",%d\r\n",
+                     profile->pdp, profile_index, apn, user, pd, profile->auth);
+    if (n < 0 || (size_t)n >= sizeof(cmd)) {
+        close(fd);
+        return -1;
+    }
+    dbg_time("%s AT cmd: %s", at_portname, cmd);
+    memset(&at_read_ctx, 0, sizeof(at_read_ctx));
+    at_read_ctx.fd = fd;
+    at_read_ctx.at_portname = at_portname;
+    if (pthread_create(&at_read_thread, 0, set_apn_at_read_thread, &at_read_ctx) != 0) {
+        dbg_time("%s create AT read thread fail", at_portname);
+        close(fd);
+        return -1;
+    }
+
+    ssize_t nw = write(fd, cmd, (size_t)n);
+    if (nw != (ssize_t)n) {
+        dbg_time("%s AT write fail", at_portname);
+        close(fd);
+        if (pthread_join(at_read_thread, NULL)) {};
+        at_read_thread = 0;
+        return -1;
+    }
+
+    if (pthread_join(at_read_thread, NULL)) {};
+    ok = at_read_ctx.ok;
+    close(fd);
+    return ok ? 0 : -1;
 }

@@ -1,19 +1,12 @@
 /*
-    Copyright (C) 2024 Quectel Wireless Solutions Co., Ltd.
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-    This program is free software; you can redistribute it and/or
-    modify it under the terms of the GNU General Public License
-    as published by the Free Software Foundation; either version 2
-    of the License, or (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, see
-    <https://www.gnu.org/licenses/>.
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
 */
 
 #include <unistd.h>
@@ -57,7 +50,7 @@
 #include <inttypes.h>
 
 #include "qlist.h"
-#include "compreh.h"
+#include "QMIThread.h"
 #include "atchannel.h"
 #include "at_tok.h"
 
@@ -234,6 +227,7 @@ static void cleanup_atc_connection(int clientfd) {
 static int atc_proxy_init(void) {
     int err;
     char *cmd;
+    int ret;
     ATResponse *p_response = NULL;
 
     err = at_handshake();
@@ -261,7 +255,12 @@ static int atc_proxy_init(void) {
         err = at_tok_scanf(p_response->p_intermediates->line, "%s%d", NULL, &old_nat);
         if (err == 2 && old_nat != new_nat) {
             safe_at_response_free(p_response);
-            asprintf(&cmd, "AT+QCFG=\"NAT\",%d", new_nat);
+            ret = asprintf(&cmd, "AT+QCFG=\"NAT\",%d", new_nat);
+            if(ret == -1)
+            {
+                dprintf("asprintf failed");
+                return -1;
+            }
             err = at_send_command(cmd, &p_response);
             safe_free(cmd);
             if (!at_response_error(err, p_response)) {

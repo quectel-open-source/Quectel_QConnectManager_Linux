@@ -1,19 +1,12 @@
 /*
-    Copyright (C) 2024 Quectel Wireless Solutions Co., Ltd.
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-    This program is free software; you can redistribute it and/or
-    modify it under the terms of the GNU General Public License
-    as published by the Free Software Foundation; either version 2
-    of the License, or (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, see
-    <https://www.gnu.org/licenses/>.
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
 */
 
 #include <sys/time.h>
@@ -33,7 +26,7 @@ typedef unsigned short sa_family_t;
 
 #include <syslog.h>
 
-#include "compreh.h"
+#include "QMIThread.h"
 
 pthread_mutex_t cm_command_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cm_command_cond = PTHREAD_COND_INITIALIZER;
@@ -292,6 +285,63 @@ pid_t getpid_by_pdp(int pdp, const char* program_name)
 
     globfree(&gt);
     return -1;
+}
+
+void ql_get_driver_rmnet_info(PROFILE_T *profile, RMNET_INFO *rmnet_info) {
+    int ifc_ctl_sock;
+    struct ifreq ifr;
+    int rc;
+    int request = 0x89F3;
+    unsigned char data[512];
+
+    memset(rmnet_info, 0x00, sizeof(*rmnet_info));
+
+    ifc_ctl_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (ifc_ctl_sock <= 0) {
+        dbg_time("socket() failed: %s\n", strerror(errno));
+        return;
+    }
+    
+    memset(&ifr, 0, sizeof(struct ifreq));
+    strncpy(ifr.ifr_name, profile->usbnet_adapter, IFNAMSIZ);
+    ifr.ifr_name[IFNAMSIZ - 1] = 0;    
+    ifr.ifr_ifru.ifru_data = (void *)data;
+        
+    rc = ioctl(ifc_ctl_sock, request, &ifr);
+    if (rc < 0) {
+        if (errno != ENOTSUP)
+            dbg_time("ioctl(0x%x, qmap_settings) errno:%d (%s), rc=%d", request, errno, strerror(errno), rc);
+    }
+    else {
+        memcpy(rmnet_info, data, sizeof(*rmnet_info));
+    }
+
+    close(ifc_ctl_sock);
+}
+
+void ql_set_driver_qmap_setting(PROFILE_T *profile, QMAP_SETTING *qmap_settings) {
+    int ifc_ctl_sock;
+    struct ifreq ifr;
+    int rc;
+    int request = 0x89F2;
+
+    ifc_ctl_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (ifc_ctl_sock <= 0) {
+        dbg_time("socket() failed: %s\n", strerror(errno));
+        return;
+    }
+    
+    memset(&ifr, 0, sizeof(struct ifreq));
+    strncpy(ifr.ifr_name, profile->usbnet_adapter, IFNAMSIZ);
+    ifr.ifr_name[IFNAMSIZ - 1] = 0;    
+    ifr.ifr_ifru.ifru_data = (void *)qmap_settings;
+        
+    rc = ioctl(ifc_ctl_sock, request, &ifr);
+    if (rc < 0) {
+        dbg_time("ioctl(0x%x, qmap_settings) failed: %s, rc=%d", request, strerror(errno), rc);
+    }
+
+    close(ifc_ctl_sock);	
 }
 
 void no_trunc_strncpy(char *dest, const char *src, size_t dest_size)
