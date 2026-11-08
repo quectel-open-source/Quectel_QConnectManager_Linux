@@ -1,19 +1,12 @@
 /*
-    Copyright (C) 2024 Quectel Wireless Solutions Co., Ltd.
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-    This program is free software; you can redistribute it and/or
-    modify it under the terms of the GNU General Public License
-    as published by the Free Software Foundation; either version 2
-    of the License, or (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, see
-    <https://www.gnu.org/licenses/>.
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
 */
 
 #include <sys/socket.h>
@@ -26,7 +19,7 @@
 #include <endian.h>
 
 #include "util.h"
-#include "compreh.h"
+#include "QMIThread.h"
 extern int ql_get_netcard_carrier_state(const char *devname);
 
 static __inline in_addr_t qmi2addr(uint32_t __x) {
@@ -117,6 +110,47 @@ static void ifc_set_state(const char *ifname, int state) {
         snprintf(shell_cmd, sizeof(shell_cmd), "ifconfig %s %s", ifname, state ? "up" : "down");
     }
     ql_system(shell_cmd);
+}
+
+static int ql_netcard_ipv4_address_check(const char *ifname, in_addr_t ip) {
+    in_addr_t addr = 0;
+
+    ifc_get_addr(ifname, &addr);
+    return addr == ip;
+}
+
+static int ql_raw_ip_mode_check(const char *ifname, uint32_t ip) {
+    int fd;
+    char raw_ip[128];
+    char mode[2] = "X";
+    int mode_change = 0;
+
+    if (ql_netcard_ipv4_address_check(ifname, qmi2addr(ip)))
+        return 0;
+    
+    snprintf(raw_ip, sizeof(raw_ip), "/sys/class/net/%s/qmi/raw_ip", ifname);
+    if (access(raw_ip, F_OK))
+        return 0;
+
+    fd = open(raw_ip, O_RDWR | O_NONBLOCK | O_NOCTTY);
+    if (fd < 0) {
+        dbg_time("%s %d fail to open(%s), errno:%d (%s)", __FILE__, __LINE__, raw_ip, errno, strerror(errno));
+        return 0;
+    }
+
+    if (read(fd, mode, 2) == -1) {};
+    if (mode[0] == '0' || mode[0] == 'N') {
+        dbg_time("File:%s Line:%d udhcpc fail to get ip address, try next:", __func__, __LINE__);
+        ifc_set_state(ifname, 0);
+        dbg_time("echo Y > /sys/class/net/%s/qmi/raw_ip", ifname);
+        mode[0] = 'Y';
+        if (write(fd, mode, 2) == -1) {};
+        mode_change = 1;
+        ifc_set_state(ifname, 1);
+    }
+
+    close(fd);
+    return mode_change;
 }
 
 static void* udhcpc_thread_function(void* arg) {
@@ -472,7 +506,7 @@ void udhcpc_start(PROFILE_T *profile) {
             dbg_time("pcscf2: %s", ipv6Str(profile->PCSCFIpv6Addr2));
     }
 
-#if 0 //for bridge mode, only one public IP, so do udhcpc manually
+#if 1 //for bridge mode, only one public IP, so do udhcpc manually
     if (ql_bridge_mode_detect(profile)) {
         return;
     }
@@ -492,7 +526,10 @@ void udhcpc_start(PROFILE_T *profile) {
     if (profile->ipv4.Address == 0)
         goto set_ipv6;
 
-    
+    if (profile->no_dhcp || profile->usb_dev.idProduct == 0x0316 || profile->request_ops == &mbim_request_ops) { //lots of mbim modem do not support DHCP
+        update_ip_address_by_qmi(ifname, &profile->ipv4, NULL);
+    }
+    else
 /* Do DHCP using busybox tools */
     {
         char udhcpc_cmd[128];
@@ -552,7 +589,45 @@ void udhcpc_start(PROFILE_T *profile) {
                 }
             }
 
-            goto set_ipv6;
+            if (profile->request_ops != &qmi_request_ops) { //only QMI modem support next fixup!
+                goto set_ipv6;
+            }
+
+            if (ql_raw_ip_mode_check(ifname, profile->ipv4.Address)) {
+                pthread_create(&udhcpc_thread_id, NULL, udhcpc_thread_function, (void*)strdup(udhcpc_cmd));
+                pthread_join(udhcpc_thread_id, NULL);
+            }
+
+            if (!ql_netcard_ipv4_address_check(ifname, qmi2addr(profile->ipv4.Address))) {
+                //no udhcpc's default.script exist, directly set ip and dns
+                update_ip_address_by_qmi(ifname, &profile->ipv4, NULL);
+            }
+            //Add by Demon. check default route 
+            FILE *rt_fp = NULL;
+            char rt_cmd[128] = {0};
+            
+            //Check if there is a default route. 
+            snprintf(rt_cmd, sizeof(rt_cmd), "route -n | grep %s | awk '{print $1}' | grep 0.0.0.0", ifname);
+            rt_fp = popen((const char *)rt_cmd, "r");
+            if (rt_fp != NULL) {
+              char buf[20] = {0};
+              int found_default_rt = 0;
+
+              if (fgets(buf, sizeof(buf), rt_fp) != NULL) {
+                //Find the specified interface
+                found_default_rt = 1;
+              }
+
+              if (1 == found_default_rt) {
+                //dbg_time("Route items found for %s", ifname);
+              }
+              else {
+                dbg_time("Warning: No route items found for %s", ifname);
+              }
+
+              pclose(rt_fp);
+            }
+            //End by Demon.
 #endif
     }
 
